@@ -389,14 +389,19 @@ class App(tk.Tk):
 
         def _worker():
             try:
+                # Windows の cp932 で絵文字/日本語が化けないよう UTF-8 モードを強制
+                env = os.environ.copy()
+                env["PYTHONIOENCODING"] = "utf-8"
+                env["PYTHONUTF8"] = "1"
                 self._proc = subprocess.Popen(
-                    [sys.executable, tmp.name],
+                    [sys.executable, "-X", "utf8", tmp.name],
                     stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT,
                     text=True,
                     encoding="utf-8",
                     errors="replace",
                     bufsize=1,
+                    env=env,
                 )
                 for line in self._proc.stdout:
                     self._log(line)
