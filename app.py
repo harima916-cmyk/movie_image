@@ -23,7 +23,6 @@ BASE_DIR = Path(__file__).parent
 PROGRAMS_DIR = BASE_DIR / "programs"
 SETTINGS_FILE = BASE_DIR / "settings.json"
 
-
 # ──── 設定の保存・読み込み ────────────────────────────────────────────────────
 
 def load_settings() -> dict:
@@ -32,7 +31,6 @@ def load_settings() -> dict:
     except Exception:
         return {}
 
-
 def save_settings(data: dict) -> None:
     try:
         SETTINGS_FILE.write_text(
@@ -40,115 +38,88 @@ def save_settings(data: dict) -> None:
     except Exception:
         pass
 
+# ──── 共通定数 ────────────────────────────────────────────────────────────────
 
-# ──── ツール固有ランナー生成（INLINE ツール用） ──────────────────────────────
+_ALL_ENCODERS = [
+    "H.264 CPU (libx264)",
+    "H.265 CPU (libx265)",
+    "H.264 NVENC (NVIDIA)",
+    "H.265 NVENC (NVIDIA)",
+    "H.264 AMF (AMD)",
+    "H.265 AMF (AMD)",
+    "H.264 QSV (Intel)",
+    "H.265 QSV (Intel)",
+]
+_H264_ENCODERS = [
+    "H.264 CPU (libx264)",
+    "H.264 NVENC (NVIDIA)",
+    "H.264 AMF (AMD)",
+    "H.264 QSV (Intel)",
+]
+_ENCODER_CODEC = {
+    "H.264 CPU (libx264)":  "libx264",
+    "H.265 CPU (libx265)":  "libx265",
+    "H.264 NVENC (NVIDIA)": "h264_nvenc",
+    "H.265 NVENC (NVIDIA)": "hevc_nvenc",
+    "H.264 AMF (AMD)":      "h264_amf",
+    "H.265 AMF (AMD)":      "hevc_amf",
+    "H.264 QSV (Intel)":    "h264_qsv",
+    "H.265 QSV (Intel)":    "hevc_qsv",
+}
+_PRESETS      = ["ultrafast", "superfast", "veryfast", "faster",
+                 "fast", "medium", "slow", "veryslow"]
+_ROTATE_DIR   = ["なし", "1: 90°時計回り", "2: 90°反時計回り",
+                 "0: 上下反転+90°CW", "3: 上下反転+90°CCW"]
+_ROTATE_VIDEO = ["-90: 時計回り", "90: 反時計回り", "180: 上下反転"]
+_AUDIO_OPTS   = ["AAC 128k", "AAC 192k", "AAC 256k", "コピー（再エンコードなし）"]
 
-def _build_runner_rotate_png(values: dict) -> str:
-    """PNG → MP4（回転付き）: 無損失版 + 圧縮版を連続生成"""
-    pd = repr(str(PROGRAMS_DIR))
-    rotate_val = int(str(values["ROTATE"]).split(":")[0])
-    return (
-        f"import sys\n"
-        f"sys.path.insert(0, {pd})\n"
-        f"import create_mp4_rotate as _m\n"
-        f"from pathlib import Path\n"
-        f"from datetime import datetime\n"
-        f"output_dir = Path({repr(str(values['OUTPUT_DIR']))})\n"
-        f"output_dir.mkdir(parents=True, exist_ok=True)\n"
-        f"ts = datetime.now().strftime('%Y-%m-%dT%H-%M-%S')\n"
-        f"lossless = str(output_dir / f'{{ts}}_lossless.mp4')\n"
-        f"_m.create_lossless_mp4(\n"
-        f"    {repr(str(values['INPUT_DIR']))}, lossless,\n"
-        f"    fps={int(values['FPS'])}, start_number=0, rotate={rotate_val}\n"
-        f")\n"
-        f"_m.compress_mp4(lossless, str(output_dir), "
-        f"crf={int(values['CRF'])}, preset={repr(str(values['PRESET']))})\n"
-    )
+# ──── 生成スクリプトに埋め込む共通 ffmpeg 引数ビルダ ─────────────────────────
+# ※ この文字列は生成スクリプト内の関数として展開されます
 
+_ENC_ARGS_CODE = """\
+def _enc_args(codec, crf, preset):
+    if codec in ("h264_nvenc", "hevc_nvenc"):
+        return ["-c:v", codec, "-preset", "p4", "-cq", str(crf)]
+    if codec in ("h264_amf", "hevc_amf"):
+        return ["-c:v", codec, "-quality", "quality",
+                "-qp_i", str(crf), "-qp_p", str(crf)]
+    if codec in ("h264_qsv", "hevc_qsv"):
+        return ["-c:v", codec, "-global_quality", str(crf)]
+    return ["-c:v", codec, "-preset", preset, "-crf", str(crf)]
+"""
 
-def _build_runner_vr_mp4(values: dict) -> str:
-    """PNG → 360° VR MP4"""
-    pd = repr(str(PROGRAMS_DIR))
-    return (
-        f"import sys\n"
-        f"sys.path.insert(0, {pd})\n"
-        f"import create_VR as _m\n"
-        f"from pathlib import Path\n"
-        f"from datetime import datetime\n"
-        f"output_dir = Path({repr(str(values['OUTPUT_DIR']))})\n"
-        f"output_dir.mkdir(parents=True, exist_ok=True)\n"
-        f"ts = datetime.now().strftime('%Y-%m-%dT%H-%M-%S')\n"
-        f"out = str(output_dir / f'{{ts}}_360.mp4')\n"
-        f"_m.encode_360_from_sequence(\n"
-        f"    {repr(str(values['INPUT_DIR']))}, out,\n"
-        f"    fps={int(values['FPS'])}, crf={int(values['CRF'])}, "
-        f"preset={repr(str(values['PRESET']))}\n"
-        f")\n"
-        f"print(f'完了: {{out}}')\n"
-    )
+_FFMPEG_INIT_CODE = """\
+try:
+    import imageio_ffmpeg
+    FFMPEG = imageio_ffmpeg.get_ffmpeg_exe()
+except Exception:
+    FFMPEG = "ffmpeg"
+"""
 
+# ──── ランナー生成関数 ────────────────────────────────────────────────────────
 
-def _build_runner_png_resize(values: dict) -> str:
-    """PNG リサイズ（OpenCV）"""
-    pd = repr(str(PROGRAMS_DIR))
-    return (
-        f"import sys\n"
-        f"sys.path.insert(0, {pd})\n"
-        f"import png_compress as _m\n"
-        f"_m.resize_images_opencv_parallel(\n"
-        f"    {repr(str(values['INPUT_DIR']))},\n"
-        f"    {repr(str(values['OUTPUT_DIR']))},\n"
-        f"    {int(values['WIDTH'])}, {int(values['HEIGHT'])},\n"
-        f"    max_workers={int(values['WORKERS'])}\n"
-        f")\n"
-        f"print('完了')\n"
-    )
+def _build_runner_png_to_mp4(values: dict) -> str:
+    """PNG → MP4 統合ランナー（CPU/GPU・回転・VRモード対応）"""
+    codec   = _ENCODER_CODEC.get(str(values.get("ENCODER", "")), "libx264")
+    fps     = int(values.get("FPS", 60))
+    crf     = int(values.get("CRF", 18))
+    preset  = repr(str(values.get("PRESET", "slow")))
+    dry_run = repr(bool(values.get("DRY_RUN", False)))
 
+    rotate_str = str(values.get("ROTATE", "なし"))
+    rotate_val = repr(None if rotate_str == "なし" else int(rotate_str.split(":")[0]))
 
-def _build_runner_rotate_video(values: dict) -> str:
-    """MP4 回転（MoviePy）"""
-    angle = int(str(values["ROTATE_ANGLE"]).split(":")[0])
-    return (
-        f"from moviepy.editor import VideoFileClip\n"
-        f"from pathlib import Path\n"
-        f"from datetime import datetime\n"
-        f"output_dir = Path({repr(str(values['OUTPUT_DIR']))})\n"
-        f"output_dir.mkdir(parents=True, exist_ok=True)\n"
-        f"ts = datetime.now().strftime('%Y-%m-%dT%H-%M-%S')\n"
-        f"out = str(output_dir / f'{{ts}}.mp4')\n"
-        f"clip = VideoFileClip({repr(str(values['INPUT_FILE']))})\n"
-        f"clip.rotate({angle}).write_videofile(out, codec='libx264', audio_codec='aac')\n"
-        f"print(f'完了: {{out}}')\n"
-    )
-
-
-def _build_runner_gpu_mp4(values: dict) -> str:
-    """GPU エンコーダーを使った PNG → MP4（ffmpeg 直接呼び出し）"""
-    codec_map = {
-        "h264_nvenc (NVIDIA)": "h264_nvenc",
-        "h264_amf (AMD)":      "h264_amf",
-        "h264_qsv (Intel)":    "h264_qsv",
-        "hevc_nvenc (NVIDIA)": "hevc_nvenc",
-        "hevc_amf (AMD)":      "hevc_amf",
-        "hevc_qsv (Intel)":    "hevc_qsv",
-    }
-    codec    = codec_map.get(str(values.get("ENCODER", "")), "h264_nvenc")
-    ir       = repr(str(values.get("INPUT_ROOT", "")))
-    od       = repr(str(values.get("OUTPUT_DIR", ".")))
-    fps      = int(values.get("FPS", 60))
-    crf      = int(values.get("CRF", 18))
-    dry_run  = repr(bool(values.get("DRY_RUN", False)))
+    vr_mode = repr(bool(values.get("VR_MODE", False)))
+    ir = repr(str(values.get("INPUT_ROOT", "")))
+    od = repr(str(values.get("OUTPUT_DIR", ".")))
 
     return f"""\
 import re, subprocess
 from pathlib import Path
 from datetime import datetime
 
-try:
-    import imageio_ffmpeg
-    FFMPEG = imageio_ffmpeg.get_ffmpeg_exe()
-except Exception:
-    FFMPEG = "ffmpeg"
+{_FFMPEG_INIT_CODE}
+{_ENC_ARGS_CODE}
 
 def _find_png_dirs(root):
     counts = {{}}
@@ -166,41 +137,151 @@ def _guess_start(d):
 input_root = Path({ir})
 output_dir = Path({od})
 output_dir.mkdir(parents=True, exist_ok=True)
-codec, fps, crf, dry_run = {repr(codec)}, {fps}, {crf}, {dry_run}
+codec, fps, crf, preset = {repr(codec)}, {fps}, {crf}, {preset}
+rotate, vr_mode, dry_run = {rotate_val}, {vr_mode}, {dry_run}
 
 dirs = _find_png_dirs(input_root)
 print(f"対象フォルダ数: {{len(dirs)}}")
+
 for d in dirs:
     start = _guess_start(d)
     ts  = datetime.now().strftime("%Y-%m-%dT%H-%M-%S")
     out = output_dir / f"{{ts}}.mp4"
     pat = str(d / "%d.png")
-    if codec in ("h264_nvenc", "hevc_nvenc"):
-        enc = ["-c:v", codec, "-preset", "p4", "-cq", str(crf)]
-    elif codec in ("h264_amf", "hevc_amf"):
-        enc = ["-c:v", codec, "-quality", "quality",
-               "-qp_i", str(crf), "-qp_p", str(crf)]
-    else:
-        enc = ["-c:v", codec, "-global_quality", str(crf)]
+
+    enc     = _enc_args(codec, crf, preset)
+    vf_args = ["-vf", f"transpose={{rotate}}"] if rotate is not None else []
+    vr_args = (["-g", str(fps * 2), "-bf", "2",
+                "-profile:v", "high", "-level", "5.2"] if vr_mode else [])
+
     cmd = [FFMPEG, "-y", "-hide_banner",
            "-framerate", str(fps), "-start_number", str(start), "-i", pat,
-           *enc, "-pix_fmt", "yuv420p", "-movflags", "faststart", str(out)]
+           *enc, *vf_args, *vr_args,
+           "-pix_fmt", "yuv420p", "-movflags", "faststart", str(out)]
+
     print(f"▶ {{d.name}} -> {{out.name}}")
     if dry_run:
-        print(f"  [DRY RUN] {{' '.join(cmd)}}")
+        print("  [DRY RUN]", " ".join(cmd))
     else:
         subprocess.run(cmd, check=True)
         print(f"  ✅ 完了: {{out}}")
 """
 
 
+def _build_runner_compress_mp4(values: dict) -> str:
+    """MP4 圧縮ランナー（コーデック・品質・音声を自由設定）"""
+    codec  = _ENCODER_CODEC.get(str(values.get("ENCODER", "")), "libx264")
+    crf    = int(values.get("CRF", 23))
+    preset = repr(str(values.get("PRESET", "slow")))
+
+    audio_raw = str(values.get("AUDIO", "AAC 128k"))
+    audio_args = (
+        ["-c:a", "copy"] if audio_raw == "コピー（再エンコードなし）"
+        else ["-c:a", "aac", "-b:a", audio_raw.split()[-1].lower()]
+    )
+
+    inf  = repr(str(values.get("INPUT_FILE", "")))
+    od   = repr(str(values.get("OUTPUT_DIR", ".")))
+    dry_run = repr(bool(values.get("DRY_RUN", False)))
+
+    return f"""\
+import subprocess
+from pathlib import Path
+from datetime import datetime
+
+{_FFMPEG_INIT_CODE}
+{_ENC_ARGS_CODE}
+
+input_file = Path({inf})
+output_dir = Path({od})
+output_dir.mkdir(parents=True, exist_ok=True)
+codec, crf, preset = {repr(codec)}, {crf}, {preset}
+audio_args = {repr(audio_args)}
+dry_run = {dry_run}
+
+ts  = datetime.now().strftime("%Y-%m-%dT%H-%M-%S")
+out = output_dir / f"{{input_file.stem}}_{{codec}}_crf{{crf}}_{{ts}}.mp4"
+
+enc = _enc_args(codec, crf, preset)
+cmd = [FFMPEG, "-y", "-hide_banner", "-i", str(input_file),
+       *enc, *audio_args,
+       "-pix_fmt", "yuv420p", "-movflags", "faststart", str(out)]
+
+print(f"入力   : {{input_file.name}}")
+print(f"エンコーダー: {{codec}},  品質(CRF): {{crf}}")
+print(f"音声   : {{' '.join(audio_args)}}")
+print(f"出力   : {{out}}")
+if dry_run:
+    print("[DRY RUN]", " ".join(cmd))
+else:
+    subprocess.run(cmd, check=True)
+    orig = input_file.stat().st_size / 1024 / 1024
+    new  = out.stat().st_size / 1024 / 1024
+    print(f"✅ 完了: {{orig:.1f}} MB -> {{new:.1f}} MB  (削減率 {{(1-new/orig)*100:.1f}}}%)")
+"""
+
+
+def _build_runner_rotate_video(values: dict) -> str:
+    """MP4 回転ランナー（ffmpeg GPU 対応・音声コピー）"""
+    codec = _ENCODER_CODEC.get(str(values.get("ENCODER", "")), "libx264")
+    crf   = int(values.get("CRF", 18))
+
+    angle_str = str(values.get("ROTATE_ANGLE", "-90: 時計回り"))
+    angle = int(angle_str.split(":")[0])
+    if angle == -90:
+        vf = "transpose=1"
+    elif angle == 90:
+        vf = "transpose=2"
+    else:
+        vf = "vflip,hflip"
+
+    inf = repr(str(values.get("INPUT_FILE", "")))
+    od  = repr(str(values.get("OUTPUT_DIR", ".")))
+
+    return f"""\
+import subprocess
+from pathlib import Path
+from datetime import datetime
+
+{_FFMPEG_INIT_CODE}
+{_ENC_ARGS_CODE}
+
+input_file = Path({inf})
+output_dir = Path({od})
+output_dir.mkdir(parents=True, exist_ok=True)
+codec, crf = {repr(codec)}, {crf}
+
+ts  = datetime.now().strftime("%Y-%m-%dT%H-%M-%S")
+out = output_dir / f"{{ts}}.mp4"
+
+enc = _enc_args(codec, crf, "slow")
+cmd = [FFMPEG, "-y", "-hide_banner", "-i", str(input_file),
+       "-vf", {repr(vf)},
+       *enc, "-c:a", "copy",
+       "-pix_fmt", "yuv420p", "-movflags", "faststart", str(out)]
+
+print(f"▶ {{input_file.name}} -> {{out.name}}  ({{codec}})")
+subprocess.run(cmd, check=True)
+print(f"✅ 完了: {{out}}")
+"""
+
+
+def _build_runner_png_resize(values: dict) -> str:
+    """PNG リサイズ（OpenCV）"""
+    pd = repr(str(PROGRAMS_DIR))
+    return (
+        f"import sys\n"
+        f"sys.path.insert(0, {pd})\n"
+        f"import png_compress as _m\n"
+        f"_m.resize_images_opencv_parallel(\n"
+        f"    {repr(str(values['INPUT_DIR']))},\n"
+        f"    {repr(str(values['OUTPUT_DIR']))},\n"
+        f"    {int(values['WIDTH'])}, {int(values['HEIGHT'])},\n"
+        f"    max_workers={int(values['WORKERS'])}\n"
+        f")\nprint('完了')\n"
+    )
+
 # ──── 汎用ランナービルダー ────────────────────────────────────────────────────
-
-_GPU_ENCODERS = {
-    "h264_nvenc (NVIDIA)", "h264_amf (AMD)", "h264_qsv (Intel)",
-    "hevc_nvenc (NVIDIA)", "hevc_amf (AMD)", "hevc_qsv (Intel)",
-}
-
 
 def build_runner(tool: dict, values: dict) -> str:
     cfg_type = tool["config_type"]
@@ -208,18 +289,8 @@ def build_runner(tool: dict, values: dict) -> str:
     if cfg_type == "INLINE":
         return tool["runner_fn"](values)
 
-    pd = repr(str(PROGRAMS_DIR))
+    pd     = repr(str(PROGRAMS_DIR))
     module = tool["module"]
-
-    if cfg_type == "CONFIG_ARG":
-        if values.get("ENCODER") in _GPU_ENCODERS:
-            return _build_runner_gpu_mp4(values)
-        clean = {k: v for k, v in values.items() if k != "ENCODER"}
-        full  = {**tool.get("extra_config", {}), **clean}
-        return (f"import sys\nsys.path.insert(0, {pd})\n"
-                f"import {module} as _m\n"
-                f"_m.CONFIG.update({repr(full)})\n"
-                f"_m.main(_m.CONFIG)\n")
 
     if cfg_type == "CONFIG_ONLY":
         full = {**tool.get("extra_config", {}), **values}
@@ -243,106 +314,45 @@ def build_runner(tool: dict, values: dict) -> str:
     lines.append("_m.main()")
     return "\n".join(lines) + "\n"
 
-
-# ──── ツール定義 ──────────────────────────────────────────────────────────────
-
-_PRESETS      = ["ultrafast", "superfast", "veryfast", "faster",
-                 "fast", "medium", "slow", "veryslow"]
-_H264_ENCS    = ["libx264 (CPU)", "h264_nvenc (NVIDIA)", "h264_amf (AMD)", "h264_qsv (Intel)"]
-_H265_ENCS    = ["libx265 (CPU)", "hevc_nvenc (NVIDIA)", "hevc_amf (AMD)", "hevc_qsv (Intel)"]
-_ROTATE_DIR   = ["1: 90°時計回り", "2: 90°反時計回り",
-                 "0: 上下反転+90°CW", "3: 上下反転+90°CCW"]
-_ROTATE_VIDEO = ["-90: 時計回り", "90: 反時計回り", "180: 上下反転"]
+# ──── ツール定義（7ツール）────────────────────────────────────────────────────
 
 TOOLS = [
     {
-        "name": "PNG → MP4 (H.264)",
-        "desc": "PNG 連番フォルダを H.264 MP4 に一括変換します",
-        "module": "create_mp4",
-        "config_type": "CONFIG_ARG",
-        "params": [
-            {"key": "INPUT_ROOT", "label": "入力フォルダ（自動探索）",                 "type": "dir"},
-            {"key": "OUTPUT_DIR", "label": "出力フォルダ（空=入力と同じ場所）",        "type": "dir"},
-            {"key": "FPS",        "label": "FPS",                                      "type": "int",   "default": 60},
-            {"key": "CRF",        "label": "CRF（0=無損失 / 18=高品質 / 51=低品質）", "type": "int",   "default": 18},
-            {"key": "PRESET",     "label": "プリセット（速い ←→ 遅い/小さい）",        "type": "combo", "default": "veryslow", "values": _PRESETS},
-            {"key": "ENCODER",    "label": "エンコーダー",                             "type": "combo", "default": "libx264 (CPU)", "values": _H264_ENCS},
-            {"key": "PROFILE",    "label": "H.264 プロファイル（CPU時のみ）",          "type": "entry", "default": "high"},
-            {"key": "LEVEL",      "label": "H.264 レベル（CPU時のみ）",                "type": "entry", "default": "5.1"},
-            {"key": "DRY_RUN",    "label": "ドライラン（実行しない）",                 "type": "bool",  "default": False},
-        ],
-        "extra_config": {
-            "INPUT_MODE": "auto", "INPUT_DIRS": [], "RECURSIVE": True, "MIN_PNGS": 2,
-            "SKIP_IF_EXISTS": True, "OUT_NAME_MODE": "timestamp",
-            "START_NUMBER": "auto", "KEYINT_SECONDS": 2, "TUNE": "",
-        },
-    },
-    {
-        "name": "PNG → MP4 (H.265)",
-        "desc": "PNG 連番フォルダを H.265 MP4 に一括変換します（高圧縮・低ファイルサイズ）",
-        "module": "create_mp4_list",
-        "config_type": "CONFIG_ARG",
-        "params": [
-            {"key": "INPUT_ROOT", "label": "入力フォルダ（自動探索）",          "type": "dir"},
-            {"key": "OUTPUT_DIR", "label": "出力フォルダ（空=入力と同じ場所）", "type": "dir"},
-            {"key": "FPS",        "label": "FPS",                              "type": "int",   "default": 60},
-            {"key": "CRF",        "label": "CRF（品質 20〜24 目安）",           "type": "int",   "default": 20},
-            {"key": "PRESET",     "label": "プリセット",                        "type": "combo", "default": "veryslow", "values": _PRESETS},
-            {"key": "ENCODER",    "label": "エンコーダー",                      "type": "combo", "default": "libx265 (CPU)", "values": _H265_ENCS},
-            {"key": "DRY_RUN",    "label": "ドライラン（実行しない）",          "type": "bool",  "default": False},
-        ],
-        "extra_config": {
-            "INPUT_MODE": "auto", "INPUT_DIRS": [], "RECURSIVE": True, "MIN_PNGS": 2,
-            "SKIP_IF_EXISTS": True, "OUT_NAME_MODE": "timestamp",
-            "START_NUMBER": "auto", "KEYINT_SECONDS": 2,
-            "PIX_FMT": "yuv420p", "X265_TUNE": "",
-        },
-    },
-    {
-        "name": "PNG → MP4 (回転付き)",
-        "desc": "PNG 連番フォルダを回転しながら MP4 に変換します（無損失版＋圧縮版を同時生成）",
+        "name": "PNG → MP4",
+        "desc": "PNG 連番フォルダを MP4 に変換します。コーデック・GPU・回転・360°VR を一括設定できます。",
         "config_type": "INLINE",
-        "runner_fn": _build_runner_rotate_png,
+        "runner_fn": _build_runner_png_to_mp4,
         "params": [
-            {"key": "INPUT_DIR",  "label": "入力フォルダ",                      "type": "dir"},
-            {"key": "OUTPUT_DIR", "label": "出力フォルダ（空=入力と同じ場所）", "type": "dir"},
+            {"key": "INPUT_ROOT", "label": "入力フォルダ（自動探索）",           "type": "dir"},
+            {"key": "OUTPUT_DIR", "label": "出力フォルダ（空=入力と同じ場所）",  "type": "dir"},
             {"key": "FPS",        "label": "FPS",                               "type": "int",   "default": 60},
-            {"key": "ROTATE",     "label": "回転方向",                          "type": "combo", "default": "1: 90°時計回り", "values": _ROTATE_DIR},
-            {"key": "CRF",        "label": "圧縮版 CRF",                        "type": "int",   "default": 18},
-            {"key": "PRESET",     "label": "プリセット",                         "type": "combo", "default": "slow", "values": _PRESETS},
-        ],
-    },
-    {
-        "name": "PNG → MP4 (360° VR)",
-        "desc": "PNG 連番フォルダを 360°（等距円筒図法）MP4 に変換します",
-        "config_type": "INLINE",
-        "runner_fn": _build_runner_vr_mp4,
-        "params": [
-            {"key": "INPUT_DIR",  "label": "入力フォルダ",                      "type": "dir"},
-            {"key": "OUTPUT_DIR", "label": "出力フォルダ（空=入力と同じ場所）", "type": "dir"},
-            {"key": "FPS",        "label": "FPS",                               "type": "int",   "default": 60},
-            {"key": "CRF",        "label": "CRF",                               "type": "int",   "default": 18},
-            {"key": "PRESET",     "label": "プリセット",                         "type": "combo", "default": "veryslow", "values": _PRESETS},
+            {"key": "ENCODER",    "label": "エンコーダー",                       "type": "combo", "default": "H.264 CPU (libx264)", "values": _ALL_ENCODERS},
+            {"key": "CRF",        "label": "品質 CRF（低いほど高品質・大容量）", "type": "int",   "default": 18},
+            {"key": "PRESET",     "label": "プリセット（CPU のみ有効）",          "type": "combo", "default": "slow", "values": _PRESETS},
+            {"key": "ROTATE",     "label": "回転",                               "type": "combo", "default": "なし", "values": _ROTATE_DIR},
+            {"key": "VR_MODE",    "label": "360° VR モード",                    "type": "bool",  "default": False},
+            {"key": "DRY_RUN",    "label": "ドライラン（実行しない）",           "type": "bool",  "default": False},
         ],
     },
     {
         "name": "MP4 圧縮",
-        "desc": "MP4 ファイルを再エンコードして圧縮します",
-        "module": "compress_mp4",
-        "config_type": "CONFIG_ONLY",
+        "desc": "MP4 ファイルを再エンコードして圧縮します。エンコーダー・品質・音声を自由に設定できます。",
+        "config_type": "INLINE",
+        "runner_fn": _build_runner_compress_mp4,
         "params": [
             {"key": "INPUT_FILE", "label": "入力 MP4 ファイル",                  "type": "file",
              "filetypes": [("MP4 ファイル", "*.mp4"), ("すべて", "*.*")]},
             {"key": "OUTPUT_DIR", "label": "出力フォルダ（空=入力と同じ場所）",  "type": "dir"},
-            {"key": "PRESET",     "label": "プリセット",                          "type": "combo", "default": "fanbox_h264",
-             "values": ["fanbox_h264", "size_hevc_cpu", "speed_hevc_amf"]},
+            {"key": "ENCODER",    "label": "エンコーダー",                        "type": "combo", "default": "H.264 CPU (libx264)", "values": _ALL_ENCODERS},
+            {"key": "CRF",        "label": "品質 CRF（H.264: 18-28 / H.265: 22-32）", "type": "int", "default": 23},
+            {"key": "PRESET",     "label": "プリセット（CPU のみ有効）",          "type": "combo", "default": "slow", "values": _PRESETS},
+            {"key": "AUDIO",      "label": "音声",                               "type": "combo", "default": "AAC 128k", "values": _AUDIO_OPTS},
             {"key": "DRY_RUN",    "label": "ドライラン（実行しない）",            "type": "bool",  "default": False},
         ],
-        "extra_config": {"SHOW_PROGRESS": True, "OVERRIDE": {}},
     },
     {
         "name": "MP4 → GIF",
-        "desc": "MP4 ファイルを GIF アニメーションに変換します",
+        "desc": "MP4 ファイルを GIF アニメーションに変換します。",
         "module": "mp4_to_gif",
         "config_type": "CONFIG_ONLY",
         "params": [
@@ -363,7 +373,7 @@ TOOLS = [
     },
     {
         "name": "MP4 回転",
-        "desc": "MP4 動画を回転させます（MoviePy 使用）",
+        "desc": "MP4 動画を回転させます。GPU エンコーダーを選択すると高速に処理できます。音声はコピーします。",
         "config_type": "INLINE",
         "runner_fn": _build_runner_rotate_video,
         "params": [
@@ -372,11 +382,14 @@ TOOLS = [
             {"key": "OUTPUT_DIR",   "label": "出力フォルダ（空=入力と同じ場所）",  "type": "dir"},
             {"key": "ROTATE_ANGLE", "label": "回転方向",                            "type": "combo",
              "default": "-90: 時計回り", "values": _ROTATE_VIDEO},
+            {"key": "ENCODER",      "label": "エンコーダー",                        "type": "combo",
+             "default": "H.264 CPU (libx264)", "values": _H264_ENCODERS},
+            {"key": "CRF",          "label": "品質 CRF",                            "type": "int", "default": 18},
         ],
     },
     {
         "name": "PNG → JPEG",
-        "desc": "PNG ファイルを一括で JPEG に変換します（透過 PNG 対応）",
+        "desc": "PNG ファイルを一括で JPEG に変換します（透過 PNG 対応）。",
         "module": "convert_png_to_jpeg",
         "config_type": "VARS",
         "params": [
@@ -392,7 +405,7 @@ TOOLS = [
     },
     {
         "name": "PNG 圧縮",
-        "desc": "PNG 画像を一括圧縮・リサイズします（Pillow 使用）",
+        "desc": "PNG 画像を一括圧縮・リサイズします（Pillow 使用）。",
         "module": "compression_png",
         "config_type": "VARS",
         "params": [
@@ -411,7 +424,7 @@ TOOLS = [
     },
     {
         "name": "PNG リサイズ (OpenCV)",
-        "desc": "PNG 画像を OpenCV で高速並列リサイズします",
+        "desc": "PNG 画像を OpenCV で高速並列リサイズします。",
         "config_type": "INLINE",
         "runner_fn": _build_runner_png_resize,
         "params": [
@@ -423,7 +436,6 @@ TOOLS = [
         ],
     },
 ]
-
 
 # ──── GUI アプリ ──────────────────────────────────────────────────────────────
 
@@ -442,57 +454,48 @@ class App(tk.Tk):
     # ── UI 構築 ──────────────────────────────────────────────────────────────
 
     def _setup_ui(self):
-        # ヘッダー
         hdr = ttk.Frame(self, padding=(8, 6))
         hdr.pack(fill=tk.X)
         ttk.Label(hdr, text="Movie Image Tools", font=("", 14, "bold")).pack(side=tk.LEFT)
 
-        # ツール選択
         sel = ttk.Frame(self, padding=(8, 2))
         sel.pack(fill=tk.X)
         ttk.Label(sel, text="ツール:").pack(side=tk.LEFT)
         self._tool_combo = ttk.Combobox(
-            sel, values=[t["name"] for t in TOOLS], state="readonly", width=30)
+            sel, values=[t["name"] for t in TOOLS], state="readonly", width=28)
         self._tool_combo.current(0)
         self._tool_combo.pack(side=tk.LEFT, padx=6)
         self._tool_combo.bind("<<ComboboxSelected>>", lambda _e: self._on_tool_change())
 
-        # ツール説明
         self._desc_var = tk.StringVar()
         ttk.Label(self, textvariable=self._desc_var, foreground="#555555",
                   wraplength=880, justify=tk.LEFT, padding=(8, 2)).pack(fill=tk.X)
 
         ttk.Separator(self, orient=tk.HORIZONTAL).pack(fill=tk.X, padx=8, pady=4)
 
-        # 設定フォーム（スクロール可）
         form_wrap = ttk.LabelFrame(self, text="設定", padding=(6, 4))
         form_wrap.pack(fill=tk.X, padx=8, pady=(0, 4))
-
         canvas = tk.Canvas(form_wrap, highlightthickness=0)
         vsb = ttk.Scrollbar(form_wrap, orient=tk.VERTICAL, command=canvas.yview)
         canvas.configure(yscrollcommand=vsb.set)
         vsb.pack(side=tk.RIGHT, fill=tk.Y)
         canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-
         self._form_frame = ttk.Frame(canvas)
-        self._canvas_window = canvas.create_window((0, 0), window=self._form_frame, anchor=tk.NW)
+        self._canvas_win = canvas.create_window((0, 0), window=self._form_frame, anchor=tk.NW)
 
-        def _on_frame_configure(_e):
+        def _on_frame_cfg(_e):
             canvas.configure(scrollregion=canvas.bbox("all"))
-            h = min(self._form_frame.winfo_reqheight(), 280)
-            canvas.configure(height=h)
+            canvas.configure(height=min(self._form_frame.winfo_reqheight(), 280))
+        def _on_canvas_cfg(e):
+            canvas.itemconfig(self._canvas_win, width=e.width)
 
-        def _on_canvas_configure(e):
-            canvas.itemconfig(self._canvas_window, width=e.width)
-
-        self._form_frame.bind("<Configure>", _on_frame_configure)
-        canvas.bind("<Configure>", _on_canvas_configure)
+        self._form_frame.bind("<Configure>", _on_frame_cfg)
+        canvas.bind("<Configure>", _on_canvas_cfg)
         canvas.bind_all("<MouseWheel>",
                         lambda e: canvas.yview_scroll(-1 * (e.delta // 120), "units"))
 
         ttk.Separator(self, orient=tk.HORIZONTAL).pack(fill=tk.X, padx=8, pady=4)
 
-        # ボタン行
         btn_row = ttk.Frame(self, padding=(8, 0))
         btn_row.pack(fill=tk.X)
         self._run_btn = ttk.Button(btn_row, text="▶  実行", command=self._run, width=10)
@@ -505,11 +508,9 @@ class App(tk.Tk):
         ttk.Label(btn_row, textvariable=self._status_var, foreground="#777777").pack(
             side=tk.RIGHT, padx=8)
 
-        # プログレスバー
         self._progress = ttk.Progressbar(self, mode="indeterminate")
         self._progress.pack(fill=tk.X, padx=8, pady=(4, 0))
 
-        # コンソール
         con = ttk.LabelFrame(self, text="コンソール出力", padding=(4, 2))
         con.pack(fill=tk.BOTH, expand=True, padx=8, pady=(4, 8))
         self._console = scrolledtext.ScrolledText(
@@ -522,7 +523,6 @@ class App(tk.Tk):
         tool = TOOLS[self._tool_combo.current()]
         self._desc_var.set(tool["desc"])
         self._build_form(tool)
-        # 保存済み設定を復元
         saved = self._settings.get(tool["name"], {})
         for key, var in self._widgets.items():
             if key in saved:
@@ -598,8 +598,8 @@ class App(tk.Tk):
         tool   = TOOLS[self._tool_combo.current()]
         values: dict = {}
         for param in tool["params"]:
-            key   = param["key"]
-            raw   = self._widgets[key].get()
+            key    = param["key"]
+            raw    = self._widgets[key].get()
             p_type = param["type"]
             if p_type == "int":
                 try:
@@ -624,7 +624,7 @@ class App(tk.Tk):
                 continue
             key = param["key"]
             if not key.startswith("INPUT"):
-                continue  # 出力フォルダは存在チェック不要
+                continue
             val = str(values.get(key, "")).strip()
             if not val:
                 errors.append(f"「{param['label']}」を指定してください")
@@ -703,8 +703,7 @@ class App(tk.Tk):
                 env["PYTHONUTF8"] = "1"
                 self._proc = subprocess.Popen(
                     [sys.executable, "-X", "utf8", tmp.name],
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
+                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                     text=True, encoding="utf-8", errors="replace", bufsize=1,
                     env=env,
                 )
